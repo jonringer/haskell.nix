@@ -1,4 +1,12 @@
-final: prev: prev.lib.optionalAttrs prev.stdenv.hostPlatform.isMusl ({
+final: prev: let
+  # post 23.05 on 2023-06-12, this option was renamed to enableStatic.
+  # This was done to be more consistent with packages with similar toggles
+  bzip-func = import "${prev.pkgs.path}/pkgs/tools/compression/bzip2";
+  bzip-static-attrs = builtins.intersectAttrs (builtins.functionArgs bzip-func) {
+    enableStatic = true;
+    linkStatic = true;
+  };
+in prev.lib.optionalAttrs prev.stdenv.hostPlatform.isMusl ({
   # Prevent pkgsMusl.pkgsStatic chain
   busybox-sandbox-shell = prev.busybox-sandbox-shell.override { inherit (final) busybox; };
 
@@ -9,7 +17,7 @@ final: prev: prev.lib.optionalAttrs prev.stdenv.hostPlatform.isMusl ({
   zlib = prev.zlib.override { splitStaticOutput = false; };
 
   # and a few more packages that need their static libs explicitly enabled
-  bzip2 = prev.bzip2.override { linkStatic = true; };
+  bzip2 = prev.bzip2.override bzip-static-attrs;
   gmp = prev.gmp.override { withStatic = true; };
   ncurses = prev.ncurses.override { enableStatic = true; };
   libsodium = prev.libsodium.overrideAttrs (_: { dontDisableStatic = true; });
