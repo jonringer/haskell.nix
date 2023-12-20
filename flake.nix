@@ -23,12 +23,6 @@
       url = "git+https://gitlab.haskell.org/ghc/ghc?submodules=1";
     };
     flake-compat = { url = "github:input-output-hk/flake-compat/hkm/gitlab-fix"; flake = false; };
-    "hls-1.10" = { url = "github:haskell/haskell-language-server/1.10.0.0"; flake = false; };
-    "hls-2.0" = { url = "github:haskell/haskell-language-server/2.0.0.1"; flake = false; };
-    "hls-2.2" = { url = "github:haskell/haskell-language-server/2.2.0.0"; flake = false; };
-    "hls-2.3" = { url = "github:haskell/haskell-language-server/2.3.0.0"; flake = false; };
-    "hls-2.4" = { url = "github:haskell/haskell-language-server/2.4.0.1"; flake = false; };
-    hydra.url = "hydra";
     hackage = {
       url = "github:input-output-hk/hackage.nix";
       flake = false;
@@ -47,10 +41,6 @@
     };
     cabal-36 = {
       url = "github:haskell/cabal/3.6";
-      flake = false;
-    };
-    cardano-shell = {
-      url = "github:input-output-hk/cardano-shell";
       flake = false;
     };
     "ghc-8.6.5-iohk" = {
@@ -101,15 +91,6 @@
 
       inherit (nixpkgs) lib;
 
-      traceNames = prefix: builtins.mapAttrs (n: v:
-        if builtins.isAttrs v
-          then if v ? type && v.type == "derivation"
-            then builtins.trace (prefix + n) v
-            else traceNames (prefix + n + ".") v
-          else v);
-
-      traceHydraJobs = x: x // { inherit (traceNames "" x) hydraJobs; };
-
       # systems supported by haskell.nix
       systems = [
         "x86_64-linux"
@@ -125,13 +106,7 @@
 
       forEachSystem = lib.genAttrs systems;
       forEachSystemPkgs = f: forEachSystem (system: f self.legacyPackages.${system});
-
-      inherit
-        (import ./ci-lib.nix { inherit lib; })
-        stripAttrsForHydra
-        filterDerivations;
-
-    in traceHydraJobs ({
+    in {
       inherit config;
       overlay = self.overlays.combined;
       overlays = import ./overlays { sources = inputs; };
@@ -169,132 +144,5 @@
           overlays = [ self.overlay ];
           localSystem = { inherit system; };
         });
-
-      # Exposed so CI can check that `allow-import-from-derivation=false` works
-      # for core of haskell.nix E.g. this should always work:
-      #   nix build .#roots.x86_64-linux --accept-flake-config --option allow-import-from-derivation false
-      roots = forEachSystem (system:
-        self.legacyPackagesUnstable.${system}.haskell-nix.roots compiler);
-
-      # Note: `nix flake check` evaluates outputs for all platforms, and haskell.nix
-      # uses IFD heavily, you have to have the ability to build for all platforms
-      # supported by haskell.nix, e.g. with remote builders, in order to check this flake.
-      # If you want to run the tests for just your platform, run `./test/tests.sh` or
-      # `nix-build -A checks.$PLATFORM`
-      checks = forEachSystemPkgs (pkgs:
-        builtins.listToAttrs (
-          map
-            (pkg: { name = pkg.name; value = pkg; })
-            (lib.collect
-              lib.isDerivation
-              (import ./test {
-                haskellNix.sources = inputs;
-                haskellNix.nixpkgsArgs = nixpkgsArgs;
-                compiler-nix-name = compiler;
-                inherit pkgs;
-              })
-              )
-            )
-        );
-
-      # NOTE: these are the hix cli utilities, which is a separate thing from
-      # the hix.nix overlays (which extends haskell.nix with hixProject).
-      packages = forEachSystemPkgs (pkgs:
-        (import ./hix/default.nix { inherit pkgs; }).apps
-      );
-
-      allJobs = forEachSystem (system:
-        stripAttrsForHydra (filterDerivations (
-          # This is awkward.
-          import ./ci.nix {
-            inherit system;
-            haskellNix = self;
-          })));
-
-      requiredJobs = forEachSystem (system:
-        let
-          inherit (self.legacyPackages.${system}) releaseTools;
-        in
-          lib.concatMapAttrs (nixpkgsVer:
-            lib.concatMapAttrs (compiler-nix-name:
-              lib.concatMapAttrs (crossPlatform: ghcJobs:
-                let
-                  name = "required-${nixpkgsVer}-${compiler-nix-name}-${crossPlatform}";
-                  value = releaseTools.aggregate {
-                      name = "haskell.nix-${nixpkgsVer}-${compiler-nix-name}-${crossPlatform}";
-                      meta.description = "All ${nixpkgsVer} ${compiler-nix-name} ${crossPlatform} jobs";
-                      constituents = lib.collect lib.isDerivation ghcJobs;
-                  };
-                in
-                lib.optionalAttrs
-                  (crossPlatform != "recurseForDerivations" && crossPlatform != "meta")
-                  { ${name} = value; })
-              )
-            )
-            self.allJobs.${system}
-          );
-
-      hydraJobs = forEachSystem (system:
-        let
-          # Include hydraJobs from nix-tools subflake.
-          # NOTE: These derivations do not depend on the haskell.nix in ./. but
-          # on the version of haskell.nix locked in the subflake. They are
-          # evaluated within their own flake and independently of anything
-          # else. Here we only expose them in the main flake.
-          nix-tools-hydraJobs =
-            let cf = callFlake {
-              inherit system;
-              pkgs = self.legacyPackages.${system};
-              src = ./nix-tools;
-              override-inputs = {
-                # Avoid downloading another `hackage.nix`.
-                inherit (inputs) hackage;
-              };
-            };
-            in cf.defaultNix.hydraJobs;
-        in
-        self.allJobs.${system} // { nix-tools = nix-tools-hydraJobs.${system} or {}; }
-      );
-
-      devShells = forEachSystemPkgs (pkgs:
-        let inherit (pkgs) mkShell nixUnstable cabal-install haskell-nix;
-        in {
-          default =
-            mkShell {
-              buildInputs = [
-                nixUnstable
-                cabal-install
-                haskell-nix.compiler.${compiler}
-              ];
-            };
-        }
-        //
-        builtins.mapAttrs
-          (compiler-nix-name: compiler:
-            mkShell {
-              buildInputs = [
-                compiler
-                haskell-nix.cabal-install.${compiler-nix-name}
-              ];
-            })
-          ( # Exclude old versions of GHC to speed up `nix flake check`
-            builtins.removeAttrs haskell-nix.compiler
-              [ "ghc844"
-                "ghc861" "ghc862" "ghc863" "ghc864"
-                "ghc881" "ghc882" "ghc883"
-                "ghc8101" "ghc8102" "ghc8103" "ghc8104" "ghc8105" "ghc8106" "ghc810420210212"
-                "ghc901"
-                "ghc921" "ghc922" "ghc923"])
-      );
-    });
-
-  # --- Flake Local Nix Configuration ----------------------------
-  nixConfig = {
-    # This sets the flake to use the IOG nix cache.
-    # Nix should ask for permission before using it,
-    # but remove it here if you do not want it to.
-    extra-substituters = ["https://cache.iog.io"];
-    extra-trusted-public-keys = ["hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ="];
-    allow-import-from-derivation = "true";
-  };
+      };
 }
